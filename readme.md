@@ -1,4 +1,4 @@
-PostgreSQL Database Samples
+<b>PostgreSQL Database Samples</b>
 
 A collection of sample databases for PostgreSQL.
 
