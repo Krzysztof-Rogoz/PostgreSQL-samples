@@ -1,0 +1,394 @@
+#------------------------------------------------------------------------------
+#
+#  Postgres DB backup - restore
+#
+#  #DBA #DevOps #DataMigration #Datareplication
+#  #GitLab #pipeline #jobs #yaml #Hashicorp #security #auth
+#  #Azure #Postgres #Linux #bash #db_dump #psql
+#
+#  https://github.com/Krzysztof-Rogoz/PostgreSQL-samples
+#
+#  Created: 29-Dec-2023
+#  Author: Krzysztof Rogoz
+#  https://www.linkedin.com/in/krzysztof-rogoz-19b6781/
+#------------------------------------------------------------------------------
+
+#  Integrated enterprise solution to maintain Postgres data
+#  Synchronizes data across environments (e.g.Prod->Dev)
+#  Configurable and customizable, can be used as template / design pattern
+#  Useful example of conditional logic, conditions encoded either in both:
+#   bash (case-esac) and yaml workflow rules
+#
+#
+#
+#  Basic features / options:
+#    - select mode: FULL refresh (including code) or OneTable (only data*)
+#    - works with both: partitioned and non-partitioned tables
+#    - select only environment (instance) as SOURCE (FROM) and TARGET (TO), setup whole env
+#    - get passwords from hashicorp (called: EVA), for restricted environments (like PROD generates 1h token
+#    - wide range of initial variables excluded into separate files for clarity
+#    - hidden job (.set_up_variables) can be reused many times through keyword "extends: set_up_variables"
+#    - job sequence is controlled by using keyword: "needs:" whenever dependency exists
+#    - only variables needed to connection string passed to downstream processes in GitLab way
+#        artifacts:
+#            reports:
+#               dotenv: variables.env
+#    - 2 different VM image used to workaround limitations (one for Postgres operations, another for unix/azure
+#    - due to specific variables definition UI with reasonable defaults is displayed at start
+#    - user names are different between instances but in the same naming convention,
+#       they can be constructed from constant prefix/suffix and instance id
+#       additionally roles with the same names exist in each instance: db_readonly,  db_readwrite, db_owner
+#    -  and DB object privileges (SELECT,INSERT, DELETE, EXECUTE ROUTINE) are grated to those roles
+#
+#  DB_DUMP provides many useful options, e.g.:
+#    -T - excludes some objects, e.g large log tables
+#    -Ft (dump format: tar) is convenient for full backup, but restoring single partitioned table with dependency (e.g view)
+#      requires custom maintenance: use "-Fp --clean --if-exists"  with "-t" for all partitions but "-T" for the "mother" table.
+#      This combination generates script to drop all partitions but preserve the main table, to avoid integrity constraint error
+#      Option "-Fp" generates plain text to be imported by psql tool instead of pg_restore
+#    --no-privileges used to avoid inconsistency issues because each instance/env has another DB owner
+#    - by default pg_dump gets password from the file /root/.pgpass with Unix access rights 660,
+#        this file is generated in VM at the beginning of job and is destroyed with VM at the end of execution
+#        so password in open text does NOT remain anywhere
+#
+#  NOTE:
+#    This sample covers 2 environments: DEV and PROD with masquaraded instance addresses, like DDDDD and PPPPP
+#    Code can be easily extended by more environments like TEST, UAT, PreProd etc
+#---------------------------------------------------------
+
+#
+# content of included file: "config.yml"
+variables:
+    PROCESS:
+        value: "OneTable"
+        description: Define what will pipeline restore, values *DB / OneTable / Test*
+    SOURCE:
+        value: "prod"
+        description: Source Database Environment Name. *dev / prod*
+    TARGET:
+        value: "dev"
+        description: Destination Database Environment Name. *dev / prod*
+    SCHEMA_NAME:
+        value: "<schema>"
+        description: Applicable for OneTable only
+    TABLE_NAME:
+        value: "<table_name>"
+        description: Table that you want to backup and restore.
+    IS_TABLE_PARTITIONED:
+        value: "no"
+        description: partitions must be re-created for consistency, choose option  *yes / no*
+    SOURCE_PASSWORD_FOR_DEV:
+        value: "NA"
+        description:  Optional, provide admin passwd only if SOURCE=dev (for not EVA managed passwords)
+    TARGET_PASSWORD_FOR_DEV:
+        value: "NA"
+        description:  Optional, provide admin passwd only if SOURCE=dev (for not EVA managed passwords)
+
+
+.set_up_variables: &set_up_variables
+    before_script:
+        - >
+            case ${SOURCE} in
+                dev)
+                    export SOURCE_ID="XXXXX"
+                    export SOURCE_EVA_ADDR="NA"
+                    export SOURCE_EVA_NAMESPACE="NA"
+                    export SOURCE_ROLE_NAME="NA"                    
+                    export SOURCE_SECRET_ADDR=""
+                    export SOURCE_SUBSCR_ID=""
+                    export SOURCE_USERNAME="adm_${SOURCE_ID}"
+                    ;;
+                prod)
+                    export SOURCE_ID="XXXXX"
+                    export SOURCE_EVA_ADDR="https://vault.eva.<<mycompany>>.com/"
+                    export SOURCE_EVA_NAMESPACE="MY${SOURCE_ID}"
+                    export SOURCE_ROLE_NAME="role_${SOURCE}"                    
+                    export SOURCE_SECRET_ADDR="secret/deploy/myUID/adm_atXXXXX"
+                    export SOURCE_SUBSCR_ID="<<subsc_UID>>"
+                    export SOURCE_USERNAME="adm_${SOURCE_ID}"
+                    ;;
+            esac
+
+        - >
+            case ${TARGET} in
+                dev)
+                    export TARGET_ID="XXXXX"
+                    export TARGET_EVA_ADDR="NA"
+                    export TARGET_EVA_NAMESPACE="NA"  
+                    export TARGET_ROLE_NAME="NA"                                      
+                    export TARGET_SECRET_ADDR=""
+                    export TARGET_SUBSCR_ID=""
+                    export TARGET_USERNAME="adm_${TARGET_ID}"
+                    ;;
+                prod)
+                    export TARGET_ID="XXXXX"
+                    export TARGET_EVA_ADDR="https://vault.eu.eva<<mycompany>>.com/"
+                    export TARGET_EVA_NAMESPACE="MY${TARGET_ID}"
+                    export TARGET_ROLE_NAME="role_${TARGET}"                     
+                    export TARGET_SECRET_ADDR="secret/deploy/myUID/adm_atXXXXX"
+                    export TARGET_SUBSCR_ID="<<subsc_UID>>"
+                    export TARGET_USERNAME="adm_${TARGET_ID}"
+                    ;;
+            esac
+
+        - export SP_TENANT_ID="<<tenant_UID>>"
+        - export SOURCE_HOST="${SOURCE_ID}-pgserver.postgres.database.azure.com"
+        - export SOURCE_DB_NAME="${SOURCE_ID}_db"
+
+        - export SP_TENANT_ID="<<tenant_UID>>"
+        - export TARGET_HOST=${TARGET_ID}-pgserver.postgres.database.azure.com
+        - export TARGET_DB_NAME="${TARGET_ID}_db"
+
+
+
+#
+# content of included file: "post-create.sql"
+#
+ALTER DEFAULT PRIVILEGES IN SCHEMA <<mySchema>> REVOKE ALL ON TABLES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA <<mySchema>> REVOKE ALL ON ROUTINES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA <<mySchema>> GRANT EXECUTE ON ROUTINES TO db_readwrite WITH GRANT OPTION;
+GRANT ALL ON SCHEMA <<mySchema>> TO db_readwrite;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA <<mySchema>>
+GRANT ALL ON TABLES TO db_readwrite;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA <<mySchema>>
+GRANT EXECUTE ON FUNCTIONS TO db_readwrite WITH GRANT OPTION;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA <<mySchema>>
+GRANT USAGE ON TYPES TO db_readwrite WITH GRANT OPTION;
+--
+-- DEFAULT GRANTS for another DB objects - if used ...
+--
+------------------------------------------------------
+
+
+#
+# content of the main CI/CD script: ".gitlab-ci.yml"
+#
+
+include: "/config.yml"
+
+workflow:
+    rules:
+        - if: $CI_PIPELINE_SOURCE == "schedule"
+          when: always
+        - if: '$CI_PIPELINE_SOURCE == "web"'
+          when: always
+        - when: never
+
+default:
+    image: "container-registry<<mycompany>>.com/postgres:15.2"
+
+stages:
+    - Setup Env
+    - Test
+    - Full Backup & Restore DB
+    - Backup & Restore One Table
+
+
+# Stage: Get Credentials, to be executed before any others
+# uses different VM image then others
+# creates variables and passess as artifacts *.env to next jobs
+job_get_credentials:
+    stage: Setup Env
+    needs: []
+    extends: .set_up_variables
+    image: "container-registry<<mycompany>>.com/azure-cli:2.26.1"
+    script:
+        #
+        #  Setup params for source database
+        #
+        - echo "SOURCE_HOST=${SOURCE_HOST}"         >  variables.env
+        - echo "SOURCE_DB_NAME=${SOURCE_DB_NAME}"   >> variables.env
+        - echo "SOURCE_USERNAME=${SOURCE_USERNAME}" >> variables.env
+        - > 
+           case $SOURCE in 
+               prod|preprod)
+                  curl -k -O https://it4it-nexus-tp-repo.swissbank.com/repository/proxy-bin-crossplatform-hashicorp-raw-oss-vault/1.6.2/vault_1.6.2_linux_amd64.zip
+                  unzip vault_1.6.2_linux_amd64.zip
+                  export VAULT_ADDR=${SOURCE_EVA_ADDR}
+                  export VAULT_TOKEN=$(./vault write -field=token -namespace=${SOURCE_EVA_NAMESPACE} auth/jwt/login role=${SOURCE_ROLE_NAME} jwt=${CI_JOB_JWT})
+                  export PASSWORD=$(./vault kv get -namespace=${SOURCE_EVA_NAMESPACE} -field=password ${SOURCE_SECRET_ADDR})
+                  az login  --username=${SOURCE_USERNAME} --password="${PASSWORD}" --tenant $SP_TENANT_ID
+                  az account set --subscription $SOURCE_SUBSCR_ID
+                  set -euo pipefail
+                  export SOURCE_PASSWORD=$(az account get-access-token --resource https://ossrdbms-aad.database.windows.net --output tsv --query accessToken)
+                  echo "SOURCE_PASSWORD=${SOURCE_PASSWORD}" >> variables.env
+                  ;;
+               dev|test)   
+                  echo "SOURCE_PASSWORD=${SOURCE_PASSWORD_FOR_DEV}" >> variables.env
+                  ;;
+           esac
+
+        #
+        #  Setup params for target database
+        #
+        - echo "TARGET_HOST=${TARGET_HOST}"         >> variables.env
+        - echo "TARGET_DB_NAME=${TARGET_DB_NAME}"   >> variables.env
+        - echo "TARGET_USERNAME=${TARGET_USERNAME}" >> variables.env
+        - > 
+           case $TARGET in 
+               prod|preprod)     
+                  curl -k -O https://it4it-nexus-tp-repo.swissbank.com/repository/proxy-bin-crossplatform-hashicorp-raw-oss-vault/1.6.2/vault_1.6.2_linux_amd64.zip
+                  unzip vault_1.6.2_linux_amd64.zip
+                  export VAULT_ADDR=${TARGET_EVA_ADDR}
+                  export VAULT_TOKEN=$(./vault write -field=token -namespace=${TARGET_EVA_NAMESPACE} auth/jwt/login role=${TARGET_ROLE_NAME} jwt=${CI_JOB_JWT})
+                  export PASSWORD=$(./vault kv get -namespace=${TARGET_EVA_NAMESPACE} -field=password ${TARGET_SECRET_ADDR})
+                  az login  --username=${TARGET_USERNAME} --password="${PASSWORD}" --tenant $SP_TENANT_ID
+                  az account set --subscription $TARGET_SUBSCR_ID
+                  set -euo pipefail
+                  export TARGET_PASSWORD=$(az account get-access-token --resource https://ossrdbms-aad.database.windows.net --output tsv --query accessToken)
+                  echo "TARGET_PASSWORD=${TARGET_PASSWORD}" >> variables.env
+                  ;;
+               dev|test)   
+                  echo "TARGET_PASSWORD=${TARGET_PASSWORD_FOR_DEV}" >> variables.env
+                  ;;
+           esac
+
+    artifacts:
+        reports:
+           dotenv: variables.env
+
+
+# Test if env setup is correct
+# session variables, including passwords passed through artifact file: variables.env
+test:
+    stage: Test
+    needs: ["job_get_credentials"]
+    rules:
+        - if: $PROCESS == "Test"
+          when: always
+    script:
+        - echo $SOURCE_HOST
+        - echo $SOURCE_DB_NAME
+        - echo $SOURCE_USERNAME
+        - echo $TARGET_HOST
+        - echo $TARGET_DB_NAME
+        - echo $TARGET_USERNAME
+
+
+backup_and_restore_database_schema:
+    stage: Full Backup & Restore DB
+    needs: ["job_get_credentials"]
+    rules:
+        - if: $PROCESS == "DB"
+          when: always
+
+    script:
+        - echo "${SOURCE_HOST}":"<PORT>":"${SOURCE_DB_NAME}":"${SOURCE_USERNAME}":$SOURCE_PASSWORD >> /root/.pgpass
+        - echo "${TARGET_HOST}":"<PORT>":"${TARGET_DB_NAME}":"${TARGET_USERNAME}":$TARGET_PASSWORD >> /root/.pgpass
+        - chmod 0600 /root/.pgpass
+
+          - >
+            pg_dump -Ft --host="${SOURCE_HOST}" 
+            --username="${SOURCE_USERNAME}"
+            --dbname="${SOURCE_DB_NAME}" -w --schema-only -n  <myschema> --no-owner --no-privileges
+            -f my_schema.dump
+        - >
+            pg_dump -Ft --host="${SOURCE_HOST}" 
+            --username="${SOURCE_USERNAME}"
+            --dbname="${SOURCE_DB_NAME}" -w --schema-only -n  <myschema> --no-owner --no-privileges
+            -f data_schema.sql -F p
+
+        - >
+            psql --host="${TARGET_HOST}"
+            --username="${TARGET_USERNAME}"
+            --dbname="${TARGET_DB_NAME}" -w
+            -c "DROP SCHEMA IF EXISTS <myschema> CASCADE"
+
+
+        - >
+            pg_restore --host="${TARGET_HOST}"
+            --username="${TARGET_USERNAME}"
+            --dbname="${TARGET_DB_NAME}" -w  --no-owner --no-privileges
+            my_schema.dump
+
+        - >
+            psql --host="${TARGET_HOST}"
+            --username="${TARGET_USERNAME}"
+            --dbname="${TARGET_DB_NAME}" -w
+            -f "post-create.sql"
+    artifacts:
+        paths:
+            - data_schema.sql
+        reports:
+             dotenv: variables.env
+
+
+backup_and_restore_data:
+    stage: Full Backup & Restore DB
+    needs: ["backup_and_restore_database_schema"]
+    rules:
+        - if: $PROCESS == "DB"
+          when: always
+    script:
+        - >
+            pg_dump -Ft -v --host="${SOURCE_HOST}" 
+            --username="${SOURCE_USERNAME}"
+            --dbname="${SOURCE_DB_NAME}" -w --data-only -n <myschema>  --no-owner --no-privileges
+            -T 'log_*' -T 'other_biggest_tables*' -T 
+            -f my_data.dump
+        - >
+            pg_restore -v --host="${TARGET_HOST}"
+            --username="${TARGET_USERNAME}"
+            --dbname="${TARGET_DB_NAME}" -w  --no-owner --no-privileges
+            my_data.dump
+
+
+backup_and_restore_grants:
+    stage: Full Backup & Restore DB
+    needs: ["backup_and_restore_database_schema"]
+    rules:
+        - if: $PROCESS == "DB"
+          when: always
+    script:
+        - >
+            psql --host="${TARGET_HOST}"
+            --username="${TARGET_USERNAME}"
+            --dbname="${TARGET_DB_NAME}" -w
+            -c  "call myschema.p_dba_refresh_grants()"
+            
+
+
+# This job will be executed in single-job stage:
+# Backup & Restore One Table
+# session variables, including passwords passed through artifact file: variables.env
+job_backup_and_restore_one_table:
+    stage: Backup & Restore One Table
+    needs: ["job_get_credentials"]
+    rules:
+        - if: $PROCESS == "OneTable"
+          when: always
+    script:
+        - echo "${SOURCE_HOST}":"<PORT>":"${SOURCE_DB_NAME}":"${SOURCE_USERNAME}":$SOURCE_PASSWORD >> /root/.pgpass
+        - echo "${TARGET_HOST}":"<PORT>":"${TARGET_DB_NAME}":"${TARGET_USERNAME}":$TARGET_PASSWORD >> /root/.pgpass
+        - chmod 0600 /root/.pgpass
+
+        - echo "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = '${TABLE_NAME}' and schemaname='${SCHEMA_NAME}') THEN truncate table ${SCHEMA_NAME}.${TABLE_NAME}; END IF; END \$\$" > trunc_table_script.sql
+
+        - >
+           case ${IS_TABLE_PARTITIONED} in
+                no)
+                   pg_dump -Fp -v --host="${SOURCE_HOST}" --username="${SOURCE_USERNAME}" --dbname="${SOURCE_DB_NAME}" -w --no-owner -n ${SCHEMA_NAME} -t "${SCHEMA_NAME}.${TABLE_NAME}" --no-privileges -f dump_file.sql
+                   ;;
+                yes)
+                   pg_dump -Fp -v --host="${SOURCE_HOST}" --username="${SOURCE_USERNAME}" --dbname="${SOURCE_DB_NAME}" -w --no-owner -n ${SCHEMA_NAME} --clean --if-exists -t "${SCHEMA_NAME}.part_*${TABLE_NAME}" -T "${SCHEMA_NAME}.${TABLE_NAME}" --no-privileges -f dump_file.sql
+                   ;;
+           esac   
+
+        - >
+            psql --host="${TARGET_HOST}"
+            --username="${TARGET_USERNAME}"
+            --dbname="${TARGET_DB_NAME}" -w
+            -f trunc_table_script.sql
+
+        - >            
+            psql --host="${TARGET_HOST}"
+            --username="${TARGET_USERNAME}"
+            --dbname="${TARGET_DB_NAME}" -w
+            -f dump_file.sql
+
+
+
+
