@@ -7,6 +7,9 @@ A collection of sample databases for PostgreSQL.
 3) "The Magic of digits"
 4) Virtual months generator
 5)   Row level security - TBD
+6)   Refresh grants - TBD
+7)   Change objects ownership - TBD
+8)   Monitoring / Explain plan in pgAdmin  - TBD
 
 
 Ad 1) "DB Backup & Restore"
