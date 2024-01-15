@@ -7,7 +7,7 @@ A collection of sample databases for PostgreSQL.
 3) "The Magic of digits"
 4) Virtual months generator
 5)   Row level security - TBD
-6)   Refresh grants - TBD
+6) Refresh grants - tool for DBA or CI/CD post-install script
 7)   Change objects ownership - TBD
 8)   Monitoring / Explain plan in pgAdmin  - TBD
 
@@ -41,3 +41,8 @@ Ad 5) "Row level security" is example of implementation
   table, data/facts table and Postgres view returning only records
   that current user is eligible to see. Current user from application
   is setup as session variable.
+
+Ad 6) "Refresh grants" - based on table naming conventions set proper privileges:
+  read-write or read-only to tables/views/procedures/functions for selected schema.
+  Procedure set also default schema privileges
+  To be executed e.g. after deployment, to optimize grants management 
