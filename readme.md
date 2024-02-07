@@ -8,7 +8,7 @@ A collection of sample databases for PostgreSQL.
 4) Virtual months generator
 5)   Row level security - TBD
 6) Refresh grants - tool for DBA or CI/CD post-install script
-7)   Change objects ownership - TBD
+7) Change objects ownership
 8)   Monitoring / Explain plan in pgAdmin  - TBD
 
 
@@ -46,3 +46,6 @@ Ad 6) "Refresh grants" - based on table naming conventions set proper privileges
   read-write or read-only to tables/views/procedures/functions for selected schema.
   Procedure set also default schema privileges
   To be executed e.g. after deployment, to optimize grants management 
+
+Ad 7) "Change objects ownership" - example of using system views to find
+  objects in current schema and grant to selected application user/role 
